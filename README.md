@@ -2,10 +2,10 @@
 
 Contributeur :
 
-Noe Ziadi
-Loan Keovilay
-Valentin Mignon
-Adel Boukada
+- Noe Ziadi
+- Loan Keovilay
+- Valentin Mignon
+- Adel Boukada
 
 
 
