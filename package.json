@@ -19,6 +19,7 @@
   },
   "homepage": "https://github.com/Leknif571/OIDC-tp#readme",
   "dependencies": {
+    "dotenv": "^18.0.1",
     "express": "^5.2.1",
     "express-session": "^1.19.0"
   }
