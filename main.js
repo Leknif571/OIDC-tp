@@ -1,13 +1,20 @@
+require('dotenv').config();
+
 const express = require('express');
 const session = require('express-session');
 const crypto = require('crypto');
 const app = express();
 const PORT = 3000;
 
-const WELL_KNOWN_URL = 'http://localhost:8080/realms/Test/.well-known/openid-configuration';
-const REDIRECT_URI = 'http://localhost:3000/callback';
-const CLIENT_ID = process.env.CLIENT_ID || 'node-app';
-const CLIENT_SECRET = process.env.CLIENT_SECRET || 'CLIENT_SECRET';
+for (const name of ['WELL_KNOWN_URL', 'CLIENT_ID', 'CLIENT_SECRET', 'SESSION_SECRET']) {
+    if (!process.env[name]) {
+        console.error(`Variable manquante dans .env : ${name}`);
+        process.exit(1);
+    }
+}
+
+const { WELL_KNOWN_URL, CLIENT_ID, CLIENT_SECRET, SESSION_SECRET } = process.env;
+const REDIRECT_URI = `http://localhost:${PORT}/redirect`;
 
 let issuer, authorization_endpoint, token_endpoint, userinfo_endpoint, jwks_uri;
 
@@ -29,13 +36,12 @@ function decodeJwt(token) {
     };
 }
 
-// Optionnel : vérifie la signature avec la clé publique de Keycloak (JWKS)
-async function verifyJwt(token) {
+// Vérifie la signature avec la clé publique de Keycloak (JWKS)
+function verifySignature(token, keys) {
     const [header, payload, signature] = token.split('.');
     const { kid, alg } = decodeJwt(token).header;
     if (alg !== 'RS256') return false;
 
-    const { keys } = await (await fetch(jwks_uri)).json();
     const jwk = keys.find(k => k.kid === kid);
     if (!jwk) return false;
 
@@ -48,12 +54,38 @@ async function verifyJwt(token) {
     );
 }
 
-app.use(session({ secret: crypto.randomBytes(32).toString('hex'), resave: false, saveUninitialized: false }));
+// Renvoie la liste des erreurs de validation (vide si le token est valide)
+function validateToken(token, keys, expected) {
+    const errors = [];
+    const { payload } = decodeJwt(token);
+
+    if (!verifySignature(token, keys)) errors.push('signature invalide');
+    if (payload.iss !== issuer) errors.push('iss invalide');
+    if (!payload.exp || payload.exp * 1000 <= Date.now()) errors.push('token expiré');
+
+    if (expected.aud) {
+        const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+        if (!aud.includes(expected.aud)) errors.push('aud invalide');
+    }
+    if (expected.azp && payload.azp !== expected.azp) errors.push('azp invalide');
+    if (expected.nonce && payload.nonce !== expected.nonce) errors.push('nonce invalide');
+
+    return errors;
+}
+
+app.use(session({
+    secret: SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: { httpOnly: true, sameSite: 'lax' },
+}));
 
 // Étape 1 : redirection vers la page de login Keycloak
 app.get('/', (req, res) => {
     const state = crypto.randomBytes(16).toString('hex');
+    const nonce = crypto.randomBytes(16).toString('hex');
     req.session.state = state;
+    req.session.nonce = nonce;
 
     const params = new URLSearchParams({
         redirect_uri: REDIRECT_URI,
@@ -61,19 +93,21 @@ app.get('/', (req, res) => {
         response_type: 'code',
         scope: 'openid',
         state,
+        nonce,
     });
 
     res.redirect(`${authorization_endpoint}?${params.toString()}`);
 });
 
 // Étape 2 : Keycloak redirige ici après le login
-app.get('/callback', async (req, res) => {
+app.get('/redirect', async (req, res) => {
     const { state, session_state, code, error, error_description } = req.query;
-    console.log('Paramètres reçus :', req.query);
+    const { state: expectedState, nonce } = req.session;
+    delete req.session.state;
+    delete req.session.nonce;
 
     if (error) return res.status(400).json({ error, error_description });
-    if (!state || state !== req.session.state) return res.status(400).send('State invalide');
-    delete req.session.state;
+    if (!state || !expectedState || state !== expectedState) return res.status(400).send('State invalide');
 
     // Étape 3 : échange du code contre les tokens (en backend)
     const tokenResponse = await fetch(token_endpoint, {
@@ -95,13 +129,15 @@ app.get('/callback', async (req, res) => {
     const tokenData = await tokenResponse.json();
     if (!tokenResponse.ok) return res.status(400).json(tokenData);
 
-    // Étape 4 : décodage des tokens (+ vérification de signature)
-    const accessToken = decodeJwt(tokenData.access_token);
-    const idToken = decodeJwt(tokenData.id_token);
-    const signatures = {
-        access_token: await verifyJwt(tokenData.access_token),
-        id_token: await verifyJwt(tokenData.id_token),
+    // Étape 4 : validation des tokens (signature, iss, exp, aud/azp, nonce) puis décodage
+    const { keys } = await (await fetch(jwks_uri)).json();
+    const errors = {
+        id_token: validateToken(tokenData.id_token, keys, { aud: CLIENT_ID, nonce }),
+        access_token: validateToken(tokenData.access_token, keys, { azp: CLIENT_ID }),
     };
+    if (errors.id_token.length || errors.access_token.length) {
+        return res.status(401).json({ error: 'Token invalide', details: errors });
+    }
 
     // Étape 5 : appel du endpoint userinfo avec le token d'accès
     const userInfoResponse = await fetch(userinfo_endpoint, {
@@ -111,7 +147,11 @@ app.get('/callback', async (req, res) => {
     });
     const userInfo = await userInfoResponse.json();
 
-    res.json({ access_token: accessToken, id_token: idToken, signatures, userInfo });
+    res.json({
+        id_token: decodeJwt(tokenData.id_token),
+        access_token: decodeJwt(tokenData.access_token),
+        userInfo,
+    });
 });
 
 getInfo().then(() => {
