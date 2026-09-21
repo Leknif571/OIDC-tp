@@ -18,10 +18,22 @@ async function getInfo() {
     console.log(userinfo_endpoint);
 }
 
-// getInfo();
+getInfo();
 
-app.get('/', (req, res) => {
-  res.send('Hello World!');
+app.use('/', (req,res) => {
+
+    const params = new URLSearchParams({
+        client_id: CLIENT_ID,
+        response_type: RESPONSE_TYPE,
+        scope: 'openid profile email',
+        redirect_uri: REDIRECT_URI,
+        state:  req.session.State,
+    });
+    res.send(`<a href="${authorisation_endpoint}?${params.toString()}">Login with OpenID Connect</a>`);
+})
+
+app.use("/callback", async(req,res) => {
+
 });
 
 app.listen(port, () => {
