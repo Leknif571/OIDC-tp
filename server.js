@@ -18,7 +18,7 @@ async function getInfo() {
     console.log(userinfo_endpoint);
 }
 
-getInfo();
+// getInfo();
 
 app.get('/', (req, res) => {
   res.send('Hello World!');
